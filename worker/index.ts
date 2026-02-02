@@ -1,9 +1,11 @@
 import { Hono } from "hono";
-import { MyAgent } from "./agents/my-agent";
+import { EditorAgent } from "./agents/editor-agent";
 import { agentsMiddleware } from "hono-agents";
 
 // Export the agent
-export { MyAgent };
+export { EditorAgent };
+// todo env
+export { Sandbox } from "@cloudflare/sandbox";
 
 const app = new Hono<{ Bindings: Env }>();
 
