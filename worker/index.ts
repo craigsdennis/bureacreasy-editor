@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { EditorAgent } from "./agents/editor-agent";
+import { Launcher } from "./agents/launcher-agent";
 import { agentsMiddleware } from "hono-agents";
 
-// Export the agent
-export { EditorAgent };
+// Export the agents
+export { EditorAgent, Launcher };
 // todo env
 export { Sandbox } from "@cloudflare/sandbox";
 

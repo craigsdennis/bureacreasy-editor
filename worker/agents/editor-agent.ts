@@ -17,7 +17,7 @@ export class EditorAgent extends Agent<Env, EditorState> {
         const repoUrl = "https://github.com/craigsdennis/tacoyell-marketing-site";
         await sandbox.gitCheckout(repoUrl, {depth: 1});
         // npm run dev - ??? Does it autorestart?
-        const process = await sandbox.startProcess("npm run dev");
+        await sandbox.startProcess("npm run dev");
         // Set preview url
         const results = await sandbox.exposePort(4321, {
             hostname
@@ -30,13 +30,4 @@ export class EditorAgent extends Agent<Env, EditorState> {
 
 
 
-    @callable()
-    updateSomeValue({someValue}: {someValue: string}) {
-        // Update the state, auto broadcasts
-        this.setState({
-            ...this.state,
-            someValue,
-            updateCount: this.state.updateCount + 1
-        })
-    }
 }

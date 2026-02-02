@@ -1,26 +1,15 @@
-import { useState } from "react";
-import { useAgent } from "agents/react";
-import type { Launcher, LauncherState } from "../worker/agents/launcher-agent";
+import { BrowserRouter, Routes, Route } from "react-router";
+import { LauncherPage } from "./pages/LauncherPage";
+import { EditorPage } from "./pages/EditorPage";
 
 function App() {
-  const [totalCount, setTotalCount] = useState<number>(0);
-  const agent = useAgent<Launcher, LauncherState>({
-    agent: "my-agent",
-    onStateUpdate(state) {
-      setTotalCount(state.totalCount);
-    },
-  });
-
-  async function update(formData: FormData) {
-    const someInputValue = (formData.get("some-input-value") as string) ?? "";
-    await agent.stub.updateSomeValue({ someValue: someInputValue });
-  }
-
   return (
-    <>
-    {totalCount} previews created.
-    
-    </>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<LauncherPage />} />
+        <Route path="/previews/:editorName" element={<EditorPage />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
