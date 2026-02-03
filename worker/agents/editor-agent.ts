@@ -2,6 +2,7 @@ import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import { createOpencode } from "@cloudflare/sandbox/opencode";
 import type { OpencodeClient, Config } from "@opencode-ai/sdk";
 import { Agent, callable, StreamingResponse } from "agents";
+import { mintGitHubInstallationToken } from "../utils/github";
 
 export type EditEntry = {
   prompt: string;
@@ -75,11 +76,21 @@ export class EditorAgent extends Agent<Env, EditorState> {
       GIT_COMMITTER_EMAIL: this.env.GIT_COMMITTER_EMAIL,
     });
     const { githubOwner, githubRepo } = this.state;
-    // Git checkout into 'app' directory
-    const repoUrl = `https://github.com/${githubOwner}/${githubRepo}`;
+    
+    // Mint a GitHub App installation token for git operations
+    responseStream.send("Minting GitHub token...");
+    const { token: githubToken } = await mintGitHubInstallationToken();
+    
+    // Git checkout into 'app' directory with token for authentication
+    const repoUrl = `https://x-access-token:${githubToken}@github.com/${githubOwner}/${githubRepo}`;
     responseStream.send(`Cloning ${githubOwner}/${githubRepo}...`);
     await this.sandbox.gitCheckout(repoUrl, {
       targetDir: "app",
+    });
+    
+    // Also set GITHUB_TOKEN in the sandbox env for gh cli usage
+    await this.sandbox.setEnvVars({
+      GITHUB_TOKEN: githubToken,
     });
 
     // Install dependencies with streaming output
@@ -164,7 +175,7 @@ export class EditorAgent extends Agent<Env, EditorState> {
       throw new Error("Define sandbox first");
     }
     console.log("Received prompt:", prompt);
-    responseStream.send("Starting OpenCode session...");
+    responseStream.send("Starting OpenCode session...\n");
 
     const { client } = await createOpencode<OpencodeClient>(this.sandbox, {
       directory: "/workspace/app/",
@@ -179,13 +190,19 @@ export class EditorAgent extends Agent<Env, EditorState> {
       throw new Error("Couldn't start OpenCode");
     }
     const sessionId = session.data.id;
-    responseStream.send("Session created, subscribing to events...");
+    console.log("Session created with ID:", sessionId);
+    responseStream.send(`Session created: ${sessionId}\n`);
 
-    // Send prompt and wait for response
-    responseStream.send("Sending prompt to AI...");
-    console.log("About to send prompt to session:", sessionId);
+    // Subscribe to events FIRST before sending prompt
+    responseStream.send("Subscribing to event stream...\n");
+    const events = await client.event.subscribe();
+    console.log("Subscribed to events");
+
+    // Send prompt asynchronously (doesn't wait for completion)
+    responseStream.send("Sending prompt to AI (async)...\n");
+    console.log("About to send promptAsync to session:", sessionId);
     
-    const result = await client.session.prompt({
+    await client.session.promptAsync({
       path: { id: sessionId },
       query: { directory: "/workspace/app/" },
       body: {
@@ -202,45 +219,158 @@ export class EditorAgent extends Agent<Env, EditorState> {
         ],
       },
     });
-
-    // Extract the response from the result
-    const responseParts: string[] = [];
     
-    if (result.data) {
-      const { parts } = result.data;
+    responseStream.send("Prompt sent, listening for events...\n");
+    console.log("promptAsync sent, now iterating events");
+
+    // Collect response parts for storing
+    const responseParts: string[] = [];
+    const toolCalls: string[] = [];
+    let eventCount = 0;
+
+    // Stream events back to the client
+    for await (const event of events.stream) {
+      eventCount++;
+      const eventType = (event as { type?: string }).type || "unknown";
+      console.log(`Event #${eventCount}: ${eventType}`, JSON.stringify(event).slice(0, 500));
       
-      if (parts) {
-        for (const part of parts) {
-          if (part.type === "text") {
+      // Handle message.part.updated events
+      if (eventType === "message.part.updated") {
+        const { part, delta } = (event as { 
+          type: string; 
+          properties: { 
+            part: { 
+              type: string; 
+              sessionID: string; 
+              text?: string;
+              state?: { status: string; title?: string; error?: string; output?: string };
+              tool?: string;
+            }; 
+            delta?: string 
+          } 
+        }).properties;
+        
+        // Only process parts from our session
+        if (part.sessionID !== sessionId) {
+          console.log(`Skipping event - wrong session (got ${part.sessionID}, expected ${sessionId})`);
+          continue;
+        }
+
+        console.log(`Part type: ${part.type}, delta length: ${delta?.length || 0}`);
+
+        if (part.type === "text") {
+          if (delta) {
+            // Incremental text update
+            responseStream.send(delta);
+            responseParts.push(delta);
+            console.log(`Text delta: "${delta.slice(0, 100)}..."`);
+          } else if (part.text) {
+            // Full text (no delta)
+            responseStream.send(part.text + "\n");
             responseParts.push(part.text);
-          } else if (part.type === "tool") {
-            const toolState = part.state;
-            if (toolState.status === "completed" && toolState.title) {
-              responseParts.push(`[${toolState.title}]`);
+            console.log(`Full text: "${part.text.slice(0, 100)}..."`);
+          }
+        } else if (part.type === "tool" && part.state) {
+          const toolState = part.state;
+          const toolName = part.tool || "unknown";
+          
+          if (toolState.status === "pending") {
+            const msg = `\n[Tool pending: ${toolName}]\n`;
+            responseStream.send(msg);
+            console.log(`Tool pending: ${toolName}`);
+          } else if (toolState.status === "running") {
+            const title = toolState.title || toolName;
+            const msg = `\n[Tool running: ${title}]\n`;
+            responseStream.send(msg);
+            toolCalls.push(`Running: ${title}`);
+            console.log(`Tool running: ${title}`);
+          } else if (toolState.status === "completed") {
+            const title = toolState.title || toolName;
+            const msg = `\n[Tool completed: ${title}]\n`;
+            responseStream.send(msg);
+            toolCalls.push(`Completed: ${title}`);
+            console.log(`Tool completed: ${title}, output length: ${toolState.output?.length || 0}`);
+          } else if (toolState.status === "error") {
+            const errorMsg = toolState.error || "Unknown error";
+            const msg = `\n[Tool error: ${toolName} - ${errorMsg}]\n`;
+            responseStream.send(msg);
+            toolCalls.push(`Error: ${toolName} - ${errorMsg}`);
+            console.log(`Tool error: ${toolName} - ${errorMsg}`);
+          }
+        } else if (part.type === "step-start") {
+          responseStream.send("\n[Step started]\n");
+          console.log("Step started");
+        } else if (part.type === "step-finish") {
+          responseStream.send("\n[Step finished]\n");
+          console.log("Step finished");
+        } else if (part.type === "reasoning") {
+          if (delta) {
+            responseStream.send(`[Reasoning: ${delta}]`);
+            console.log(`Reasoning delta: "${delta.slice(0, 100)}..."`);
+          }
+        } else {
+          // Log any other part types we encounter
+          console.log(`Unhandled part type: ${part.type}`, JSON.stringify(part).slice(0, 300));
+        }
+      }
+      
+      // Handle message.updated events (check for completion)
+      if (eventType === "message.updated") {
+        const message = (event as {
+          type: string;
+          properties: {
+            info: {
+              sessionID: string;
+              role: string;
+              time: { created: number; completed?: number };
+              error?: { name: string; data: { message: string } };
             }
+          }
+        }).properties.info;
+        
+        console.log(`Message updated: role=${message.role}, sessionID=${message.sessionID}, completed=${message.time.completed}`);
+        
+        if (message.sessionID === sessionId && message.role === "assistant") {
+          if (message.error) {
+            const errorMsg = `\n[Error: ${message.error.name} - ${message.error.data?.message || "Unknown"}]\n`;
+            responseStream.send(errorMsg);
+            responseParts.push(errorMsg);
+            console.log(`Message error: ${message.error.name}`);
+          }
+          
+          if (message.time.completed) {
+            console.log("Message completed, breaking event loop");
+            responseStream.send("\n\n--- Edit complete ---\n");
+            break;
           }
         }
       }
+      
+      // Handle session status updates
+      if (eventType === "session.status.updated") {
+        console.log("Session status updated:", JSON.stringify(event).slice(0, 300));
+      }
     }
     
-    // Send each part with newlines between them
-    for (const part of responseParts) {
-      responseStream.send(part + "\n");
-    }
+    console.log(`Event loop ended after ${eventCount} events`);
     
-    responseStream.send("\n--- Edit complete ---");
+    // Store the edit in state with full response
+    const fullResponse = responseParts.join("");
+    const toolSummary = toolCalls.length > 0 ? `\n\nTools used:\n${toolCalls.join("\n")}` : "";
     
-    // Store the edit in state
-    const fullResponse = responseParts.join("\n");
     const newEdit: EditEntry = {
       prompt,
-      response: fullResponse,
+      response: fullResponse + toolSummary,
       timestamp: Date.now(),
     };
+    
+    console.log(`Storing edit: prompt="${prompt.slice(0, 50)}...", response length=${newEdit.response.length}`);
     
     this.setState({
       ...this.state,
       edits: [...this.state.edits, newEdit],
     });
+    
+    responseStream.send(`\n[Stored edit #${this.state.edits.length}]\n`);
   }
 }

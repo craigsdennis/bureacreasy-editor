@@ -148,28 +148,31 @@ export function EditorPage() {
     runSetup();
   }, [connected, state.isSetup, isSettingUp, agent]);
 
-  // When a new edit is stored in state, stop showing "Processing" and refresh the iframe
+  // Refresh iframe when previewUrl changes (initial load or after edits)
+  useEffect(() => {
+    if (iframeRef.current && state.previewUrl) {
+      iframeRef.current.src = state.previewUrl;
+    }
+  }, [state.previewUrl]);
+
+  // When a new edit is stored in state, stop showing "Processing"
   useEffect(() => {
     const currentEditsCount = state.edits?.length || 0;
     
     if (currentEditsCount > prevEditsCountRef.current) {
       // A new edit was stored - stop showing processing
       setIsSubmitting(false);
-      
-      // Refresh the iframe to show the updated preview
-      if (iframeRef.current && state.previewUrl) {
-        iframeRef.current.src = state.previewUrl;
-      }
     }
     
     prevEditsCountRef.current = currentEditsCount;
-  }, [state.edits, state.previewUrl]);
+  }, [state.edits]);
 
   // Extract case number from editor name for display
   const caseNumber = editorName?.slice(-8).toUpperCase() || "00000000";
   
   // Show setup UI while setting up OR while the log is still visible after completion
-  const showSetupUI = connected && (isSettingUp || showSetupLog);
+  // But if state.isSetup is true and we have a previewUrl, show the preview
+  const showSetupUI = connected && !state.isSetup && (isSettingUp || showSetupLog);
 
   return (
     <div className="min-h-screen relative overflow-hidden" style={{ background: 'var(--paper-manila)' }}>
