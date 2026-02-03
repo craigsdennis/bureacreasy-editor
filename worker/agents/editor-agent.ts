@@ -1,6 +1,4 @@
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
-import { createOpencode } from "@cloudflare/sandbox/opencode";
-import type { OpencodeClient, Config } from "@opencode-ai/sdk";
 import { Agent, callable, StreamingResponse } from "agents";
 import { mintGitHubInstallationToken } from "../utils/github";
 
@@ -93,6 +91,10 @@ export class EditorAgent extends Agent<Env, EditorState> {
       GITHUB_TOKEN: githubToken,
     });
 
+    // Merge opencode.json config with our provider settings
+    responseStream.send("Configuring OpenCode...");
+    await this.mergeOpencodeConfig();
+
     // Install dependencies with streaming output
     responseStream.send(`Installing dependencies...`);
     await this.sandbox.exec("npm install", {
@@ -151,226 +153,183 @@ export class EditorAgent extends Agent<Env, EditorState> {
     });
   }
 
-  getOpencodeConfig(): Config {
+  /**
+   * Deep merge two objects. Values from source override target for conflicts.
+   */
+  private deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = { ...target };
+    
+    for (const key of Object.keys(source)) {
+      const sourceValue = source[key];
+      const targetValue = target[key];
+      
+      if (
+        sourceValue !== null &&
+        typeof sourceValue === "object" &&
+        !Array.isArray(sourceValue) &&
+        targetValue !== null &&
+        typeof targetValue === "object" &&
+        !Array.isArray(targetValue)
+      ) {
+        // Both are objects, deep merge
+        result[key] = this.deepMerge(
+          targetValue as Record<string, unknown>,
+          sourceValue as Record<string, unknown>
+        );
+      } else {
+        // Overwrite with source value
+        result[key] = sourceValue;
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Get our OpenCode config that we want to merge with any existing config
+   */
+  private getOurOpencodeConfig(): Record<string, unknown> {
     return {
+      "$schema": "https://opencode.ai/config.json",
       model: "cloudflare-ai-gateway/anthropic/claude-haiku-4-5",
       provider: {
         "cloudflare-ai-gateway": {
           models: {
             "anthropic/claude-haiku-4-5": {},
-            // "anthropic/claude-sonnet-4": {},
           },
         },
       },
-      permission: { 
-        webfetch: "allow", 
+      permission: {
+        webfetch: "allow",
         bash: "allow",
       },
     };
   }
 
+  /**
+   * Read existing opencode.json from sandbox, merge with our config, and write back
+   */
+  private async mergeOpencodeConfig(): Promise<void> {
+    if (!this.sandbox) {
+      throw new Error("Sandbox not initialized");
+    }
+
+    const configPath = "app/opencode.json";
+    let existingConfig: Record<string, unknown> = {};
+
+    // Try to read existing config
+    try {
+      const result = await this.sandbox.readFile(configPath);
+      if (result.success && result.content) {
+        existingConfig = JSON.parse(result.content);
+        console.log("Found existing opencode.json:", JSON.stringify(existingConfig).slice(0, 200));
+      }
+    } catch (error) {
+      // File doesn't exist or can't be parsed, that's fine
+      console.log("No existing opencode.json found, creating new one");
+    }
+
+    // Merge configs (our config takes precedence for conflicts)
+    const ourConfig = this.getOurOpencodeConfig();
+    const mergedConfig = this.deepMerge(existingConfig, ourConfig);
+
+    // Write merged config back
+    const mergedContent = JSON.stringify(mergedConfig, null, 2);
+    await this.sandbox.writeFile(configPath, mergedContent);
+    console.log("Wrote merged opencode.json:", mergedContent.slice(0, 300));
+  }
+
+  /**
+   * Strip ANSI escape codes from a string
+   */
+  private stripAnsi(str: string): string {
+    // Matches ANSI escape sequences: ESC[ ... m (colors/styles)
+    // and ESC[ ... other control codes
+    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  }
+
   @callable({ streaming: true })
   async submitPrompt(responseStream: StreamingResponse, {prompt}: {prompt: string}) {
     if (this.sandbox === undefined) {
-      throw new Error("Define sandbox first");
+      throw new Error("Sandbox not initialized");
     }
+    
     console.log("Received prompt:", prompt);
-    responseStream.send("Starting OpenCode session...\n");
+    responseStream.send("Starting OpenCode...\n");
 
-    const { client } = await createOpencode<OpencodeClient>(this.sandbox, {
-      directory: "/workspace/app/",
-      config: this.getOpencodeConfig(),
-    });
+    // Escape the prompt for shell usage
+    const escapedPrompt = prompt
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, "\\$")
+      .replace(/`/g, "\\`");
 
-    const session = await client.session.create({
-      body: { title: "Edit Session" },
-      query: { directory: "/workspace/app" },
-    });
-    if (session.data === undefined) {
-      throw new Error("Couldn't start OpenCode");
-    }
-    const sessionId = session.data.id;
-    console.log("Session created with ID:", sessionId);
-    responseStream.send(`Session created: ${sessionId}\n`);
+    const fullPrompt = `Do what you need in the codebase to make the following request happen:
 
-    // Subscribe to events FIRST before sending prompt
-    responseStream.send("Subscribing to event stream...\n");
-    const events = await client.event.subscribe();
-    console.log("Subscribed to events");
+<Request>${escapedPrompt}</Request>
 
-    // Send prompt asynchronously (doesn't wait for completion)
-    responseStream.send("Sending prompt to AI (async)...\n");
-    console.log("About to send promptAsync to session:", sessionId);
-    
-    await client.session.promptAsync({
-      path: { id: sessionId },
-      query: { directory: "/workspace/app/" },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text: `Do what you need in the codebase to make the following request happen: 
-            
-            <Request>${prompt}</Request>
-            
-            Do not ask questions, just perform actions to make the request happen
-            `,
-          },
-        ],
-      },
-    });
-    
-    responseStream.send("Prompt sent, listening for events...\n");
-    console.log("promptAsync sent, now iterating events");
+Do not ask questions, just perform actions to make the request happen.`;
 
-    // Collect response parts for storing
+    // Build the opencode run command (no --format json, just stream raw output)
+    const command = `opencode run "${fullPrompt}"`;
+    console.log("Running command:", command.slice(0, 200));
+    responseStream.send("Running opencode...\n\n");
+
+    // Collect response for storing
     const responseParts: string[] = [];
-    const toolCalls: string[] = [];
-    let eventCount = 0;
 
-    // Stream events back to the client
-    for await (const event of events.stream) {
-      eventCount++;
-      const eventType = (event as { type?: string }).type || "unknown";
-      console.log(`Event #${eventCount}: ${eventType}`, JSON.stringify(event).slice(0, 500));
-      
-      // Handle message.part.updated events
-      if (eventType === "message.part.updated") {
-        const { part, delta } = (event as { 
-          type: string; 
-          properties: { 
-            part: { 
-              type: string; 
-              sessionID: string; 
-              text?: string;
-              state?: { status: string; title?: string; error?: string; output?: string };
-              tool?: string;
-            }; 
-            delta?: string 
-          } 
-        }).properties;
-        
-        // Only process parts from our session
-        if (part.sessionID !== sessionId) {
-          console.log(`Skipping event - wrong session (got ${part.sessionID}, expected ${sessionId})`);
-          continue;
-        }
-
-        console.log(`Part type: ${part.type}, delta length: ${delta?.length || 0}`);
-
-        if (part.type === "text") {
-          if (delta) {
-            // Incremental text update
-            responseStream.send(delta);
-            responseParts.push(delta);
-            console.log(`Text delta: "${delta.slice(0, 100)}..."`);
-          } else if (part.text) {
-            // Full text (no delta)
-            responseStream.send(part.text + "\n");
-            responseParts.push(part.text);
-            console.log(`Full text: "${part.text.slice(0, 100)}..."`);
-          }
-        } else if (part.type === "tool" && part.state) {
-          const toolState = part.state;
-          const toolName = part.tool || "unknown";
+    // Run opencode via sandbox.exec with streaming
+    try {
+      await this.sandbox.exec(command, {
+        cwd: "app",
+        stream: true,
+        onOutput: (streamType, data) => {
+          // Strip ANSI codes for clean output
+          const cleanData = this.stripAnsi(data);
           
-          if (toolState.status === "pending") {
-            const msg = `\n[Tool pending: ${toolName}]\n`;
-            responseStream.send(msg);
-            console.log(`Tool pending: ${toolName}`);
-          } else if (toolState.status === "running") {
-            const title = toolState.title || toolName;
-            const msg = `\n[Tool running: ${title}]\n`;
-            responseStream.send(msg);
-            toolCalls.push(`Running: ${title}`);
-            console.log(`Tool running: ${title}`);
-          } else if (toolState.status === "completed") {
-            const title = toolState.title || toolName;
-            const msg = `\n[Tool completed: ${title}]\n`;
-            responseStream.send(msg);
-            toolCalls.push(`Completed: ${title}`);
-            console.log(`Tool completed: ${title}, output length: ${toolState.output?.length || 0}`);
-          } else if (toolState.status === "error") {
-            const errorMsg = toolState.error || "Unknown error";
-            const msg = `\n[Tool error: ${toolName} - ${errorMsg}]\n`;
-            responseStream.send(msg);
-            toolCalls.push(`Error: ${toolName} - ${errorMsg}`);
-            console.log(`Tool error: ${toolName} - ${errorMsg}`);
-          }
-        } else if (part.type === "step-start") {
-          responseStream.send("\n[Step started]\n");
-          console.log("Step started");
-        } else if (part.type === "step-finish") {
-          responseStream.send("\n[Step finished]\n");
-          console.log("Step finished");
-        } else if (part.type === "reasoning") {
-          if (delta) {
-            responseStream.send(`[Reasoning: ${delta}]`);
-            console.log(`Reasoning delta: "${delta.slice(0, 100)}..."`);
-          }
-        } else {
-          // Log any other part types we encounter
-          console.log(`Unhandled part type: ${part.type}`, JSON.stringify(part).slice(0, 300));
-        }
-      }
-      
-      // Handle message.updated events (check for completion)
-      if (eventType === "message.updated") {
-        const message = (event as {
-          type: string;
-          properties: {
-            info: {
-              sessionID: string;
-              role: string;
-              time: { created: number; completed?: number };
-              error?: { name: string; data: { message: string } };
+          if (streamType === "stderr") {
+            console.log("stderr:", cleanData);
+            // Still send stderr to client, might have useful info
+            if (cleanData.trim()) {
+              responseStream.send(cleanData);
+              responseParts.push(cleanData);
             }
+            return;
           }
-        }).properties.info;
-        
-        console.log(`Message updated: role=${message.role}, sessionID=${message.sessionID}, completed=${message.time.completed}`);
-        
-        if (message.sessionID === sessionId && message.role === "assistant") {
-          if (message.error) {
-            const errorMsg = `\n[Error: ${message.error.name} - ${message.error.data?.message || "Unknown"}]\n`;
-            responseStream.send(errorMsg);
-            responseParts.push(errorMsg);
-            console.log(`Message error: ${message.error.name}`);
+
+          // Stream stdout directly to client
+          if (cleanData) {
+            responseStream.send(cleanData);
+            responseParts.push(cleanData);
           }
-          
-          if (message.time.completed) {
-            console.log("Message completed, breaking event loop");
-            responseStream.send("\n\n--- Edit complete ---\n");
-            break;
-          }
-        }
-      }
-      
-      // Handle session status updates
-      if (eventType === "session.status.updated") {
-        console.log("Session status updated:", JSON.stringify(event).slice(0, 300));
-      }
+        },
+      });
+
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("opencode run failed:", errorMsg);
+      responseStream.send(`\n[Error: ${errorMsg}]\n`);
+      responseParts.push(`Error: ${errorMsg}`);
     }
-    
-    console.log(`Event loop ended after ${eventCount} events`);
-    
+
+    responseStream.send("\n\n--- Edit complete ---\n");
+
     // Store the edit in state with full response
     const fullResponse = responseParts.join("");
-    const toolSummary = toolCalls.length > 0 ? `\n\nTools used:\n${toolCalls.join("\n")}` : "";
-    
+
     const newEdit: EditEntry = {
       prompt,
-      response: fullResponse + toolSummary,
+      response: fullResponse,
       timestamp: Date.now(),
     };
-    
+
     console.log(`Storing edit: prompt="${prompt.slice(0, 50)}...", response length=${newEdit.response.length}`);
-    
+
     this.setState({
       ...this.state,
       edits: [...this.state.edits, newEdit],
     });
-    
+
     responseStream.send(`\n[Stored edit #${this.state.edits.length}]\n`);
   }
 }

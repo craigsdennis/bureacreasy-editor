@@ -52,6 +52,10 @@ export class Launcher extends Agent<Env, LauncherState> {
     const config = this.state.configs[configKey];
     const hostname = this.state.hostname || "";
     await editor.configure({ ...config, hostname });
+    this.setState({
+      ...this.state,
+      totalCount: this.state.totalCount + 1
+    })
     return editorName;
   }
 }
