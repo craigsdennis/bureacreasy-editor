@@ -1,0 +1,20 @@
+# Cloudflare credentials
+CLOUDFLARE_ACCOUNT_ID="your-cloudflare-account-id"
+CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
+CLOUDFLARE_GATEWAY_ID="your-ai-gateway-id"
+
+# Replicate API (for image generation, etc.)
+REPLICATE_API_TOKEN="your-replicate-api-token"
+
+# GitHub App credentials for git operations and gh CLI
+# Note: Private key must be in PKCS#8 format (-----BEGIN PRIVATE KEY-----)
+# Convert from RSA format with: openssl pkcs8 -topk8 -nocrypt -in key.pem -out key.pk8.pem
+GITHUB_APP_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY_HERE\n-----END PRIVATE KEY-----\n"
+GITHUB_APP_ID="your-github-app-id"
+GITHUB_INSTALLATION_ID="your-github-installation-id"
+
+# Git author/committer info for commits made by the agent
+GIT_AUTHOR_NAME="Your Agent Name"
+GIT_AUTHOR_EMAIL="your-email@example.com"
+GIT_COMMITTER_NAME="Your Agent Name"
+GIT_COMMITTER_EMAIL="your-email@example.com"
