@@ -44,11 +44,12 @@ export class Launcher extends Agent<Env, LauncherState> {
 
   @callable()
   async createNewPreview({ configKey }: { configKey: string }) {
-    const editorName = crypto.randomUUID();
+    const timestamp = Date.now();
+    const editorName = `${configKey}-${timestamp}`.toLowerCase();
     const editor = await getAgentByName(this.env.EditorAgent, editorName);
     const config = this.state.configs[configKey];
-    const hostname = this.state.hostname || ""
-    await editor.setup({...config, hostname});
+    const hostname = this.state.hostname || "";
+    await editor.configure({ ...config, hostname });
     return editorName;
   }
 }
