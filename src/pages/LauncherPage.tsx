@@ -131,19 +131,35 @@ export function LauncherPage() {
           </header>
 
           {/* Stats Bar */}
-          <div className="mb-8 p-4 flex items-center justify-between" style={{
+          <div className="mb-8 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4" style={{
             background: 'var(--paper-cream)',
             borderLeft: '4px solid var(--ink-navy)',
             boxShadow: '2px 2px 8px var(--shadow-soft)'
           }}>
-            <div className="flex items-center gap-3">
-              <InboxIcon className="w-5 h-5" style={{ color: 'var(--ink-faded)' }} />
-              <span className="typewriter text-sm" style={{ color: 'var(--ink-faded)' }}>
-                CASE FILE NO.
-              </span>
-              <span className="typewriter font-bold text-lg" style={{ color: 'var(--ink-navy)' }}>
-                {String(state.totalCount).padStart(5, '0')}
-              </span>
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-3">
+                <InboxIcon className="w-5 h-5" style={{ color: 'var(--ink-faded)' }} />
+                <span className="typewriter text-sm" style={{ color: 'var(--ink-faded)' }}>
+                  TOTAL EDITS:
+                </span>
+                <span className="typewriter font-bold text-lg" style={{ color: 'var(--ink-navy)' }}>
+                  {String(state.totalCount).padStart(5, '0')}
+                </span>
+              </div>
+              
+              {state.hostname && (
+                <div className="flex items-center gap-2">
+                  <span className="typewriter text-sm" style={{ color: 'var(--ink-faded)' }}>
+                    HOST:
+                  </span>
+                  <code className="text-xs px-2 py-1" style={{ 
+                    background: 'var(--paper-aged)',
+                    border: '1px solid var(--border-light)'
+                  }}>
+                    {state.hostname}
+                  </code>
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <span className="status-dot status-dot-active" />

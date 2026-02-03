@@ -62,14 +62,29 @@ function CabinetIcon({ className = "", style }: { className?: string; style?: Re
   );
 }
 
+// Send icon for prompt submission
+function SendIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+    </svg>
+  );
+}
+
 export function EditorPage() {
   const { editorName } = useParams<{ editorName: string }>();
-  const [state, setState] = useState<EditorState>({ isSetup: false });
+  const [state, setState] = useState<EditorState>({ isSetup: false, edits: [] });
   const [connected, setConnected] = useState(false);
   const [statusMessages, setStatusMessages] = useState<string[]>([]);
   const [isSettingUp, setIsSettingUp] = useState(false);
   const [showSetupLog, setShowSetupLog] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [aiResponse, setAiResponse] = useState<string[]>([]);
   const setupStartedRef = useRef(false);
+  const responseContainerRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const prevEditsCountRef = useRef(0);
 
   // Agent connection - used for state sync via onStateUpdate callback
   const agent = useAgent<EditorAgent, EditorState>({
@@ -132,6 +147,23 @@ export function EditorPage() {
     
     runSetup();
   }, [connected, state.isSetup, isSettingUp, agent]);
+
+  // When a new edit is stored in state, stop showing "Processing" and refresh the iframe
+  useEffect(() => {
+    const currentEditsCount = state.edits?.length || 0;
+    
+    if (currentEditsCount > prevEditsCountRef.current) {
+      // A new edit was stored - stop showing processing
+      setIsSubmitting(false);
+      
+      // Refresh the iframe to show the updated preview
+      if (iframeRef.current && state.previewUrl) {
+        iframeRef.current.src = state.previewUrl;
+      }
+    }
+    
+    prevEditsCountRef.current = currentEditsCount;
+  }, [state.edits, state.previewUrl]);
 
   // Extract case number from editor name for display
   const caseNumber = editorName?.slice(-8).toUpperCase() || "00000000";
@@ -505,6 +537,7 @@ export function EditorPage() {
                             <div className="monitor-screen-wrapper">
                               <div className="screen-inner-frame">
                                 <iframe
+                                  ref={iframeRef}
                                   src={state.previewUrl}
                                   title="Document Preview"
                                   className="preview-iframe"
@@ -535,6 +568,158 @@ export function EditorPage() {
                           <div className="monitor-stand">
                             <div className="stand-neck" />
                             <div className="stand-base" />
+                          </div>
+                        </div>
+
+                        {/* Prompt Input Section */}
+                        <div 
+                          className="mt-6 pt-6"
+                          style={{ borderTop: '1px dashed var(--border-medium)' }}
+                        >
+                          <div className="flex items-center gap-2 mb-3">
+                            <DocumentIcon className="w-5 h-5" style={{ color: 'var(--ink-faded)' }} />
+                            <h3 
+                              className="text-sm uppercase tracking-wider"
+                              style={{ 
+                                fontFamily: 'var(--font-typewriter)',
+                                color: 'var(--ink-faded)'
+                              }}
+                            >
+                              Change Request Form
+                            </h3>
+                          </div>
+                          
+                          <div 
+                            className="p-4"
+                            style={{ 
+                              background: 'var(--paper-aged)',
+                              border: '1px solid var(--border-light)'
+                            }}
+                          >
+                            <label 
+                              className="block text-xs uppercase tracking-wider mb-2"
+                              style={{ 
+                                fontFamily: 'var(--font-typewriter)',
+                                color: 'var(--ink-faded)'
+                              }}
+                            >
+                              Describe the changes you would like to make:
+                            </label>
+                            <textarea
+                              value={prompt}
+                              onChange={(e) => setPrompt(e.target.value)}
+                              placeholder="e.g., Change the header color to blue, add a footer with contact information..."
+                              rows={4}
+                              disabled={isSubmitting}
+                              className="w-full p-3 resize-none"
+                              style={{ 
+                                fontFamily: 'var(--font-typewriter)',
+                                fontSize: '0.875rem',
+                                background: 'var(--paper-cream)',
+                                border: '1px solid var(--border-medium)',
+                                color: 'var(--ink-navy)',
+                                outline: 'none'
+                              }}
+                              onFocus={(e) => {
+                                e.target.style.borderColor = 'var(--ink-navy)';
+                              }}
+                              onBlur={(e) => {
+                                e.target.style.borderColor = 'var(--border-medium)';
+                              }}
+                            />
+                            
+                            <div className="flex justify-end mt-3">
+                              <button
+                                onClick={async () => {
+                                  if (!prompt.trim() || isSubmitting) return;
+                                  setIsSubmitting(true);
+                                  setAiResponse([]);
+                                  
+                                  try {
+                                    // Use streaming call pattern
+                                    type StreamOptions = {
+                                      onChunk?: (chunk: unknown) => void;
+                                      onDone?: (finalChunk: unknown) => void;
+                                      onError?: (error: string) => void;
+                                    };
+                                    
+                                    await (agent as unknown as { 
+                                      call: (m: string, a: unknown[], o: StreamOptions) => Promise<void> 
+                                    }).call("submitPrompt", [{prompt}], {
+                                      onChunk: (chunk: unknown) => {
+                                        if (typeof chunk === "string") {
+                                          setAiResponse(prev => [...prev, chunk]);
+                                          // Auto-scroll to bottom
+                                          if (responseContainerRef.current) {
+                                            responseContainerRef.current.scrollTop = responseContainerRef.current.scrollHeight;
+                                          }
+                                        }
+                                      },
+                                      onDone: () => {
+                                        // isSubmitting will be set to false when state.edits updates
+                                        setPrompt("");
+                                      },
+                                      onError: (error: string) => {
+                                        console.error("Submit error:", error);
+                                        setAiResponse(prev => [...prev, `Error: ${error}`]);
+                                        setIsSubmitting(false);
+                                      }
+                                    });
+                                  } catch (error) {
+                                    console.error("Failed to submit prompt:", error);
+                                    setAiResponse(prev => [...prev, `Error: ${error}`]);
+                                    setIsSubmitting(false);
+                                  }
+                                }}
+                                disabled={!prompt.trim() || isSubmitting}
+                                className="btn-official flex items-center gap-2"
+                              >
+                                <SendIcon className="w-4 h-4" />
+                                {isSubmitting ? 'Processing...' : 'Submit Request'}
+                              </button>
+                            </div>
+
+                            {/* AI Response Output */}
+                            {(aiResponse.length > 0 || isSubmitting) && (
+                              <div 
+                                className="mt-4 pt-4"
+                                style={{ borderTop: '1px dashed var(--border-medium)' }}
+                              >
+                                <div className="flex items-center gap-2 mb-2">
+                                  <div className={`status-dot ${isSubmitting ? 'status-dot-pending' : 'status-dot-active'}`} />
+                                  <span 
+                                    className="text-xs uppercase tracking-wider"
+                                    style={{ 
+                                      fontFamily: 'var(--font-typewriter)',
+                                      color: 'var(--ink-faded)'
+                                    }}
+                                  >
+                                    {isSubmitting ? 'Processing Request...' : 'Response'}
+                                  </span>
+                                </div>
+                                <div 
+                                  ref={responseContainerRef}
+                                  className="p-3 max-h-64 overflow-y-auto"
+                                  style={{ 
+                                    background: 'var(--paper-cream)',
+                                    border: '1px solid var(--border-light)',
+                                    fontFamily: 'var(--font-mono)',
+                                    fontSize: '0.75rem',
+                                    lineHeight: '1.6',
+                                    whiteSpace: 'pre-wrap',
+                                    color: 'var(--ink-faded)'
+                                  }}
+                                >
+                                  {aiResponse.join('')}
+                                  {isSubmitting && (
+                                    <span 
+                                      className="inline-block w-2 h-4 ml-1 animate-pulse"
+                                      style={{ background: 'var(--ink-faded)' }}
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>

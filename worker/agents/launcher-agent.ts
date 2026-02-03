@@ -11,6 +11,7 @@ export type Configuration = {
   url: string;
   githubOwner: string;
   githubRepo: string;
+  port: number;
 };
 
 export type LauncherState = {
@@ -28,6 +29,7 @@ export class Launcher extends Agent<Env, LauncherState> {
         url: "https://tacoyell.craigsdemos.workers.dev",
         githubOwner: "craigsdennis",
         githubRepo: "tacoyell-marketing-site",
+        port: 4321
       },
     },
   };
